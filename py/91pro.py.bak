@@ -1,0 +1,457 @@
+# -*- coding: utf-8 -*-
+import json
+import re
+import sys
+import time
+from urllib.parse import urljoin, urlparse
+
+import requests
+from pyquery import PyQuery as pq
+
+sys.path.append('..')
+from base.spider import Spider
+
+
+class Spider(Spider):
+
+    def init(self, extend='{}'):
+        try:
+            config = json.loads(extend) if isinstance(extend, str) else extend or {}
+        except json.JSONDecodeError:
+            config = {}
+        self.proxies = config.get('proxy', {})
+        self.plp = config.get('plp', '')
+        self.headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'referer': 'https://porncvd.com/',
+            'user-agent': 'Mozilla/5.0 (Linux; Android 13; 22127RK46C Build/TKQ1.220905.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/104.0.5112.97 Mobile Safari/537.36',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1',
+            'origin': 'https://porncvd.com',
+            'accept-encoding': 'identity;q=1, *;q=0',
+            'sec-ch-ua': '"Google Chrome";v="119", "Chromium";v="119", "Not?A_Brand";v="24"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"',
+        }
+        self.host = 'https://porncvd.com'
+        self.player_base = 'https://soav.hjduas.xyz'
+
+    def getName(self):
+        return '素人AV'
+
+    def isVideoFormat(self, url):
+        return bool(re.search(r'\.(m3u8|mp4)(\?|$)', url, re.I))
+
+    def manualVideoCheck(self):
+        return False
+
+    def destroy(self):
+        return
+
+    def _fetch(self, url, params=None, headers=None, allow_redirects=True, timeout=15, retries=3):
+        h = dict(self.headers)
+        if headers:
+            h.update(headers)
+        if '/javs/' in url:
+            h['sec-ch-ua-platform'] = '"Windows"'
+            timeout = 30
+            retries = 5
+        for attempt in range(retries + 1):
+            try:
+                time.sleep(2 if '/javs/' in url else 0)
+                resp = requests.get(url, headers=h, params=params, proxies=self.proxies, timeout=timeout, allow_redirects=allow_redirects)
+                resp.encoding = resp.apparent_encoding or 'utf-8'
+                cookies_str = '; '.join([f"{k}={v}" for k, v in resp.cookies.items()]) if resp.cookies else ''
+                resp.cookies_str = cookies_str
+                return resp
+            except Exception:
+                time.sleep(1)
+                if attempt == retries:
+                    return None
+        return None
+
+    def _getpq(self, html_content):
+        try:
+            html_clean = re.sub(r'<!--.*?-->', '', html_content, flags=re.S)
+            html_clean = re.sub(r'<script[^>]*>.*?</script>', '', html_clean, flags=re.S | re.I)
+            html_clean = re.sub(r'<style[^>]*>.*?</style>', '', html_clean, flags=re.S | re.I)
+            doc = pq(html_clean if isinstance(html_content, str) else str(html_content))
+            return doc
+        except Exception:
+            return pq('')
+
+    def _extract_title(self, doc, html, url):
+        title = ''
+        if '/javs/' in url:
+            selectors = ['h1.post-title', 'h1.entry-title', 'h1.video-title', 'h1', '.post h1', 'article h1', 'body > h1', '.content h1']
+            for sel in selectors:
+                title_elem = doc(sel)
+                if title_elem:
+                    raw_title = title_elem.eq(0).text().strip()
+                    title = re.sub(r'\s+', ' ', raw_title)
+                    if self._is_valid_title(title):
+                        return title
+        title_elem = doc('title').eq(0)
+        if title_elem:
+            raw_title = title_elem.text().strip()
+            title = re.sub(r'\s+', ' ', raw_title)
+            if title and ' - ' in title:
+                title = title.split(' - ')[0].strip()
+            if self._is_valid_title(title):
+                return title
+        heading_selectors = ['h4', '.video-header h4', '.post-title h4', '.entry-content h4', '.video-title h4', 'h4.title'] + [f'h{level}' for level in [1,2,3,5,6]]
+        for sel in heading_selectors:
+            title_elem = doc(sel)
+            if title_elem:
+                raw_title = title_elem.eq(0).text().strip()
+                title = re.sub(r'\s+', ' ', raw_title)
+                if self._is_valid_title(title):
+                    return title
+        title_elem = doc('.video-title, .title, .post-title')
+        if title_elem:
+            raw_title = title_elem.eq(0).text().strip()
+            title = re.sub(r'\s+', ' ', raw_title)
+            if self._is_valid_title(title):
+                return title
+        title = doc('meta[property="og:title"]').attr('content') or ''
+        title = re.sub(r'\s+', ' ', title)
+        if title and ' - ' in title:
+            title = title.split(' - ')[0].strip()
+        if self._is_valid_title(title):
+            return title
+        heading_match = re.search(r'(?:<h[1-6][^>]*>|<div[^>]*>)?\s*#{0,6}\s*([^<>\n]{20,150}?)(?:</h[1-6]>|</div>)?', html, re.I | re.S | re.M)
+        if heading_match:
+            raw_title = heading_match.group(1).strip()
+            title = re.sub(r'[#\s]+', ' ', raw_title)
+            if self._is_valid_title(title):
+                return title
+        chinese_title_match = re.search(r'<[^>]*>([\u4e00-\u9fff]{10,100}[^<]*?)(?:A片|视频|标题|【|】)', html, re.I | re.S)
+        if chinese_title_match:
+            raw_title = chinese_title_match.group(1).strip()
+            title = re.sub(r'\s+', ' ', raw_title)
+            if self._is_valid_title(title):
+                return title
+        path = urlparse(url).path
+        vid = path.split('/')[-1].replace('.html', '') if path else ''
+        fallback = f"视频 {vid[:15]}..." if vid else '未知视频'
+        return fallback
+
+    def _is_valid_title(self, text):
+        if not text or len(text) < 5:
+            return False
+        chinese_pattern = re.search(r'[\u4e00-\u9fff]', text)
+        if chinese_pattern or 'A片' in text or len(re.sub(r'[^\w\s]', '', text)) > 10:
+            return True
+        return False
+
+    def _extract_pic(self, doc):
+        pic = doc('meta[property="og:image"]').attr('content') or ''
+        if pic:
+            return pic
+        img = doc('img.poster, img.thumb, .video-poster img, img[alt*="视频"], img[src*="jpg"], img').first()
+        if img:
+            pic = img.attr('data-src') or img.attr('src') or img.attr('data-original') or ''
+        return pic or ''
+
+    def _extract_desc(self, doc, html):
+        desc = doc('meta[name="description"]').attr('content') or doc('meta[property="og:description"]').attr('content') or ''
+        if desc:
+            return desc[:300]
+        desc_elem = doc('.video-desc, .description, .post-content p, p').first()
+        if desc_elem:
+            raw_desc = desc_elem.text().strip()
+            desc = re.sub(r'\s+', ' ', raw_desc)[:300]
+            return desc
+        p_match = re.search(r'<h[1-6][^>]*>.*?</h[1-6]>\s*<p[^>]*>([^<]{50,300}?)</p>', html, re.I | re.S)
+        if p_match:
+            raw_desc = p_match.group(1).strip()
+            desc = re.sub(r'\s+', ' ', raw_desc)[:300]
+            return desc
+        return '无描述'
+
+    def _extract_tags(self, doc, html):
+        """提取标签信息"""
+        tags = []
+        
+        # 从 a 标签中提取标签
+        tag_links = doc('a[href*="/tag/"], a.tag, .tag a, .tags a, .label a, .keywords a')
+        if tag_links:
+            for link in tag_links.items():
+                tag_text = link.text().strip()
+                tag_href = link.attr('href') or ''
+                if tag_text and tag_text not in [t['name'] for t in tags]:
+                    tags.append({
+                        'name': tag_text,
+                        'id': tag_href if tag_href.startswith('http') else urljoin(self.host, tag_href) if tag_href else ''
+                    })
+        
+        # 从 meta 标签中提取关键词
+        if not tags:
+            keywords = doc('meta[name="keywords"]').attr('content') or ''
+            if keywords:
+                for kw in keywords.split(','):
+                    kw = kw.strip()
+                    if kw and kw not in [t['name'] for t in tags]:
+                        tags.append({
+                            'name': kw,
+                            'id': f"{self.host}/search?q={kw}"
+                        })
+        
+        # 从正文中提取标签（如果有特定格式）
+        if not tags:
+            tag_match = re.findall(r'<(?:span|div|a)[^>]*class=[\'"]*tag[\'"]*[^>]*>([^<]+)<', html, re.I | re.S)
+            for tag_text in tag_match:
+                tag_text = tag_text.strip()
+                if tag_text and tag_text not in [t['name'] for t in tags]:
+                    tags.append({
+                        'name': tag_text,
+                        'id': f"{self.host}/search?q={tag_text}"
+                    })
+        
+        return tags[:20]  # 最多返回20个标签
+
+    def _extract_m3u8(self, html, page_url):
+        try:
+            video_match = re.search(r'<video[^>]*src\s*=\s*["\']([^"\']*\.m3u8[^"\']*)["\']', html, re.I | re.S)
+            if video_match:
+                url = video_match.group(1).strip().strip("'\"")
+                full_url = url if url.startswith('http') else urljoin(self.player_base, url)
+                return full_url
+            input_match = re.search(r'id\s*=\s*["\']?video-in["\']?.*?value\s*=\s*["\']([^"\']+?)["\']', html, re.I | re.S)
+            if input_match:
+                url = input_match.group(1).strip().strip("'\"")
+                full_url = url if url.startswith('http') else urljoin(self.player_base, url)
+                return full_url
+            m3u8_matches = re.findall(r'https?://[^\s\'"\]<>]+(?:\.m3u8|\.m3u8\?[^\'"\s<>]*)', html, re.I)
+            if m3u8_matches:
+                return m3u8_matches[0]
+            rel_matches = re.findall(r'/(porn91v|RouVideocmhpvtqwt0000s6wzb59kw1vm)[^\'"\s<>]*\.m3u8(?:\?[^\'"\s<>]*)?', html, re.I)
+            if rel_matches:
+                path = rel_matches[0]
+                full_url = urljoin(self.player_base, '/' + path)
+                return full_url
+            return None
+        except Exception:
+            return None
+
+    def homeContent(self, filter):
+        result = {}
+        try:
+            classes = [
+                {'type_name': '首页', 'type_id': '/'},
+                {'type_name': '男同', 'type_id': '/asiangay'},
+                {'type_name': '女同', 'type_id': '/lesbian'},
+                {'type_name': 'VIP熱門', 'type_id': '/cat/VIP熱門/'},
+                {'type_name': '台灣', 'type_id': '/cat/台灣/'},
+                {'type_name': '國產', 'type_id': '/cat/國產/'},
+                {'type_name': '自拍', 'type_id': '/cat/自拍/'},
+                {'type_name': '偷拍', 'type_id': '/cat/偷拍/'},
+                {'type_name': '流出', 'type_id': '/cat/流出/'},
+                {'type_name': '探花', 'type_id': '/cat/探花/'},
+                {'type_name': '日韓', 'type_id': '/cat/日韓/'}
+            ]
+            result['class'] = classes
+            resp = self._fetch(self.host)
+            if not resp:
+                raise Exception("首页失败")
+            doc = self._getpq(resp.text)
+            videos = self.getVideoList(doc)
+            result['list'] = videos
+        except Exception:
+            result['class'] = []
+            result['list'] = []
+        return result
+
+    def homeVideoContent(self):
+        return []
+
+    def categoryContent(self, tid, pg, filter, extend):
+        result = {'list': [], 'page': int(pg), 'pagecount': 1, 'limit': 90, 'total': 999999}
+        try:
+            if tid == '/':
+                url = self.host
+            elif tid.startswith('http'):
+                url = tid
+            else:
+                url = f'{self.host}{tid}'
+            if int(pg) > 1:
+                sep = '&' if '?' in url else '?'
+                url += f'{sep}page={pg}'
+            resp = self._fetch(url)
+            if not resp:
+                raise Exception("分类失败")
+            doc = self._getpq(resp.text)
+            videos = self.getVideoList(doc)
+            if len(videos) == 0:
+                cat_name = tid.strip('/').split('/')[-1] if '/' in tid else tid
+                ajax_url = f'{self.host}/search/javs'
+                r1 = self._fetch(ajax_url, params={'cat': cat_name, 'page': pg}, headers={'x-requested-with': 'XMLHttpRequest'})
+                if r1:
+                    d1 = self._getpq(r1.text)
+                    videos = self.getVideoList(d1)
+            result['list'] = videos
+            pagecount = self.getPageCount(doc)
+            if pagecount > 0:
+                result['pagecount'] = pagecount
+        except Exception:
+            pass
+        return result
+
+    def detailContent(self, ids):
+        result = {'list': []}
+        try:
+            vid = ids[0]
+            url = vid if vid.startswith('http') else f'{self.host}{vid}'
+            resp = self._fetch(url)
+            if not resp:
+                raise Exception("详情请求失败")
+            doc = self._getpq(resp.text)
+            html = resp.text
+            title = self._extract_title(doc, html, url)
+            pic = self._extract_pic(doc)
+            desc = self._extract_desc(doc, html)
+            tags = self._extract_tags(doc, html)
+            play_url = self._extract_m3u8(html, url)
+            
+            # 构建标签字符串
+            tags_str = ' '.join([f"[a=cr:{json.dumps({'id': t['id'], 'name': t['name']})}/]{t['name']}[/a]" for t in tags])
+            
+            vod = {
+                'vod_id': vid,
+                'vod_name': title,
+                'vod_pic': pic,
+                'vod_content': desc,
+                'vod_play_from': '播放',
+                'vod_play_url': url,
+                'vod_remarks': tags_str if tags_str else '暂无标签'
+            }
+            result['list'].append(vod)
+        except Exception:
+            vid = ids[0]
+            url = vid if vid.startswith('http') else f'{self.host}{vid}'
+            fallback_title = f"视频 {urlparse(url).path.split('/')[-1].replace('.html', '')[:20]}"
+            vod = {
+                'vod_id': vid,
+                'vod_name': fallback_title,
+                'vod_play_from': '播放',
+                'vod_play_url': url,
+                'vod_remarks': '暂无标签'
+            }
+            result['list'].append(vod)
+        return result
+
+    def searchContent(self, key, quick, pg="1"):
+        result = {'list': [], 'page': int(pg), 'pagecount': 1, 'limit': 90, 'total': 999999}
+        try:
+            url = f'{self.host}/search/javs'
+            resp = self._fetch(url, params={'search_query': key, 'page': pg}, headers={'x-requested-with': 'XMLHttpRequest'})
+            if not resp:
+                raise Exception("搜索失败")
+            doc = self._getpq(resp.text)
+            videos = self.getVideoList(doc)
+            result['list'] = videos
+            pagecount = self.getPageCount(doc)
+            if pagecount > 0:
+                result['pagecount'] = pagecount
+        except Exception:
+            pass
+        return result
+
+    def playerContent(self, flag, id, vip_flags):
+        full_url = id if id.startswith('http') else f'{self.host}{id}'
+        resp = self._fetch(full_url, headers={'referer': self.host}, timeout=20, retries=3)
+        if not resp:
+            return {'parse': 1, 'url': full_url, 'header': self.headers}
+        html = resp.text
+        doc = self._getpq(html)
+        title = self._extract_title(doc, html, full_url)
+        play_url = self._extract_m3u8(html, full_url)
+        cookies_str = getattr(resp, 'cookies_str', '')
+        if play_url and self.isVideoFormat(play_url):
+            play_headers = dict(self.headers)
+            play_headers['referer'] = full_url
+            play_headers['origin'] = self.host
+            if cookies_str:
+                play_headers['cookie'] = cookies_str
+            try:
+                test_resp = requests.head(play_url, headers=play_headers, timeout=10)
+                if test_resp.status_code == 200:
+                    return {'parse': 0, 'url': play_url, 'header': play_headers}
+            except Exception:
+                pass
+        play_headers = dict(self.headers)
+        play_headers['referer'] = full_url
+        if cookies_str:
+            play_headers['cookie'] = cookies_str
+        return {'parse': 1, 'url': full_url, 'header': play_headers}
+
+    def localProxy(self, param):
+        return []
+
+    def getVideoList(self, doc):
+        videos = []
+        try:
+            items = doc('.js-view-item')
+            for i, item in enumerate(items.items()):
+                try:
+                    link_elem = item('.position-relative a').eq(0) or item('a[href*="/javs/"]').eq(0)
+                    link = link_elem.attr('href') or ''
+                    if not link:
+                        continue
+                    link = urljoin(self.host, link) if not link.startswith('http') else link
+                    title = item('.video-title span[itemprop="name"]').text().strip()
+                    if not title:
+                        img = item('img.video-list-image').eq(0)
+                        title = img.attr('alt') or img.attr('title') or ''
+                    if not title:
+                        continue
+                    pic = item('img.video-list-image').eq(0).attr('data-src') or item('img.video-list-image').eq(0).attr('src') or ''
+                    counter = item('.video-list-counter')
+                    view, like = '0', '0'
+                    if counter:
+                        left = counter('.float-left').text()
+                        right = counter('.float-right').text()
+                        def parse_num(t):
+                            m = re.search(r'(\d+(?:\.\d+)?)k?', t, re.I)
+                            if m:
+                                return str(int(float(m.group(1)) * 1000))
+                            digs = re.findall(r'\d+', t)
+                            return digs[0] if digs else '0'
+                        view = parse_num(left)
+                        like = parse_num(right)
+                    if any(v['vod_id'] == link for v in videos):
+                        continue
+                    videos.append({
+                        'vod_id': link,
+                        'vod_name': title,
+                        'vod_pic': pic,
+                        'vod_remarks': f'👁 {view} ❤ {like}'
+                    })
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return videos
+
+    def getPageCount(self, doc):
+        try:
+            pg = doc('.pagination')
+            if not pg:
+                return 1
+            li = pg('li')
+            if not li:
+                return 1
+            last = li.eq(-2) if len(li) >= 2 else li.eq(-1)
+            txt = last.text().strip()
+            if txt.isdigit():
+                return int(txt)
+            href = last('a').attr('href') or ''
+            m = re.search(r'page=(\d+)', href)
+            return int(m.group(1)) if m else 1
+        except Exception:
+            pass
+        return 1
